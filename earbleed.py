@@ -70,7 +70,7 @@ def read_wave(filename, window_size):
     #x = np.average(x,axis=-1,keepdims=True) #uncomment this to convert everything to mono
     
     if x.shape[-1] == 2: #use joint stereo
-        print("Using joint stereo")
+        print("Using joint stereo 1")
         jointstereo = np.array([[1,1],[-1,1]])*0.5
         x = np.matmul(x, jointstereo)
 
@@ -78,30 +78,31 @@ def read_wave(filename, window_size):
     if x.shape[1]%window_size != 0:
         x = np.concatenate([x, np.zeros((x.shape[0],window_size-x.shape[0]%window_size))], axis=-1)
     
-    
     x = x/32768.0
     return x,samplerate
 
 def write_wave(filename, data, samplerate):
+    print("writewave: ", data.shape)
+    data = np.transpose(data)
     if data.shape[-1] == 2: #use joint stereo
-        print("Using joint stereo")
+        print("Using joint stereo 2")
         jointstereo = np.array([[1,-1],[1,1]])
         data = np.matmul(data, jointstereo)
     scipy.io.wavfile.write(filename, samplerate, (np.clip(data,-1.0,1.0)*32767.0).astype(np.int16))
 
 #implementation of MDCT
-def MDCTmatrix(N):
-    nums = np.arange(2*N)+0.5
-    ws = nums[:,None]/N
-    ks = nums[:N]*np.pi
-    window = (np.pi*0.5)*ws
-    matrix = (ws+0.5)*ks
-    return np.cos(matrix)*(np.sin(window)*np.sqrt(2.0/N))
-
 class MDCT:
+    def MDCTmatrix(self, N):
+        nums = np.arange(2*N)+0.5
+        ws = nums[:,None]/N
+        ks = nums[:N]*np.pi
+        window = (np.pi*0.5)*ws
+        matrix = (ws+0.5)*ks
+        return np.cos(matrix)*(np.sin(window)*np.sqrt(2.0/N))
+
     def __init__(self, N):
         self.N = N
-        self.matrix = MDCTmatrix(self.N)
+        self.matrix = self.MDCTmatrix(self.N)
 
     def forward(self, x):
         #pad with zeros to get rid of edge artifacts
@@ -114,25 +115,33 @@ class MDCT:
     def backward(self, X):
         out = np.matmul(X, np.transpose(self.matrix))
         out = out[1:, :, :self.N] + out[:-1, :, self.N:]
-        out = np.transpose(out, (0,2,1))
-        out = np.reshape(out, (-1,out.shape[-1]))
-        print(out.shape)
+        out = np.transpose(out, (1,0,2))
+        out = np.reshape(out, (out.shape[0],-1))
         return out
 
 def compressDCT(X,multiplier):
-    X = np.round(X*multiplier)
+    X = np.round(X*multiplier) #quantization. higher multiplier > better quality
+    
     print(np.min(X), np.max(X))
+    #TODO: if min and max fit in a int8, use that instead.
+    #      the datatype has to be saved in the file.
+    
+    X = np.transpose(X, (1,0,2))
+    print("Saved shape: ", X.shape)
+    X[1:, :, :] -= X[:-1, :, :]
     compressedX = Compressor.compress(X.flatten().astype(np.int8))
     return compressedX
     
 def decompressDCT(compressedX,params):
     decompressedX = Compressor.decompress(compressedX, np.int8)
     decompressedX = decompressedX.astype(np.float32) / params['m']
-    decompressedX = np.reshape(decompressedX, (-1, params['c'], WINDOW_SIZE))
+    decompressedX = np.reshape(decompressedX, (params['c'], -1, WINDOW_SIZE))
+    decompressedX = np.cumsum(decompressedX, axis=0)
+    decompressedX = np.transpose(decompressedX, (1,0,2))
     return decompressedX
 
 
-MULTIPLIER = 9.13
+MULTIPLIER = 9.33
 WINDOW_SIZE = 2048
 #wavename = "Kapittel_1.wav"
 #wavename = "rule001.wav"
@@ -161,9 +170,11 @@ params = {
     'b':bitrate,
     'l':seconds
 }
+print("Saving to EBL: ", len(X))
 save_ebl(eblname, X, params)
 
 X,params = load_ebl(eblname)
+print("Loaded from EBL: ", len(X))
 X = decompressDCT(X, params)
 x_reconstructed = mdct.backward(X)
 
