@@ -58,15 +58,28 @@ def decompress_array(compressed_data, dtype):
 
 def read_wave(filename, window_size):
     samplerate,x = scipy.io.wavfile.read(filename) #get wave data
-    x = np.transpose(x)
+    print(f"Read wav file: {x.shape} at {samplerate} Hz")
     x = x.astype(np.float32)
+    #x = np.average(x,axis=-1,keepdims=True) #uncomment this to convert everything to mono
+    
+    if x.shape[-1] == 2: #use joint stereo
+        print("Using joint stereo")
+        jointstereo = np.array([[1,1],[-1,1]])*0.5
+        x = np.matmul(x, jointstereo)
+
+    x = np.transpose(x)
     if x.shape[1]%window_size != 0:
         x = np.concatenate([x, np.zeros((x.shape[0],window_size-x.shape[0]%window_size))], axis=-1)
-    x = np.average(x,axis=0,keepdims=True) #TODO: support stereo
+    
+    
     x = x/32768.0
     return x,samplerate
 
 def write_wave(filename, data, samplerate):
+    if data.shape[-1] == 2: #use joint stereo
+        print("Using joint stereo")
+        jointstereo = np.array([[1,-1],[1,1]])
+        data = np.matmul(data, jointstereo)
     scipy.io.wavfile.write(filename, samplerate, (np.clip(data,-1.0,1.0)*32767.0).astype(np.int16))
 
 #implementation of MDCT
@@ -85,47 +98,52 @@ class MDCT:
 
     def forward(self, x):
         #pad with zeros to get rid of edge artifacts
-        x = np.concatenate([np.zeros(self.N), x, np.zeros(self.N)])
-        L = len(x)
-        
-        windows = [x[l*self.N:(l+2)*self.N] for l in range(0, L // self.N - 1)]
+        x = np.concatenate([np.zeros((x.shape[0],self.N)), x, np.zeros((x.shape[0],self.N))], axis=-1)
+        L = x.shape[-1]
+        windows = [x[:,l*self.N:(l+2)*self.N] for l in range(0, L // self.N - 1)]
         out = np.matmul(windows,self.matrix)
         return out
 
     def backward(self, X):
         out = np.matmul(X, np.transpose(self.matrix))
-        out = out[1:, :self.N] + out[:-1, self.N:]
-        return out.flatten()
-
+        out = out[1:, :, :self.N] + out[:-1, :, self.N:]
+        out = np.transpose(out, (0,2,1))
+        out = np.reshape(out, (-1,out.shape[-1]))
+        print(out.shape)
+        return out
 
 def compressDCT(X,multiplier):
     X = np.round(X*multiplier)
     print(np.min(X), np.max(X))
-    compressedX = compress_array(X.flatten().astype(np.int16))
+    compressedX = compress_array(X.flatten().astype(np.int8))
     return compressedX
     
-def decompressDCT(compressedX,multiplier):
-    decompressedX = decompress_array(compressedX, np.int16)
-    decompressedX = decompressedX.astype(np.float32) / multiplier
-    decompressedX = np.reshape(decompressedX, (-1, WINDOW_SIZE))
+def decompressDCT(compressedX,params):
+    decompressedX = decompress_array(compressedX, np.int8)
+    decompressedX = decompressedX.astype(np.float32) / params['m']
+    decompressedX = np.reshape(decompressedX, (-1, params['c'], WINDOW_SIZE))
     return decompressedX
 
 
-MULTIPLIER = 17.3
+MULTIPLIER = 9.13
 WINDOW_SIZE = 2048
 #wavename = "Kapittel_1.wav"
-wavename = "rule001.wav"
+#wavename = "rule001.wav"
+wavename = "fmi_0_gt.wav"
 x,samplerate = read_wave(wavename, WINDOW_SIZE)
 channels = x.shape[0]
 mdct = MDCT(WINDOW_SIZE)
 X = mdct.forward(x)
-originalsize = X.shape[1]*X.shape[2]
+print(X.shape, " X shape")
+originalsize = X.shape[0]*X.shape[2]
 X = compressDCT(X, MULTIPLIER)
 
 compressedsize = len(X)
+print(f"compressedsize: {compressedsize}")
 seconds = originalsize/samplerate
+print(f"seconds: {seconds}")
 bitrate = compressedsize*8/1000/seconds
-print(f"bitrate: {bitrate}kbps")
+print(f"bitrate: {bitrate} kbps")
 
 eblname = wavename[:-4]+".ebl"
 params = {
@@ -139,7 +157,7 @@ params = {
 save_ebl(eblname, X, params)
 
 X,params = load_ebl(eblname)
-X = decompressDCT(X, params['m'])
+X = decompressDCT(X, params)
 x_reconstructed = mdct.backward(X)
 
 write_wave("out.wav", x_reconstructed, samplerate)
