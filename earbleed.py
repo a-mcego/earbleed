@@ -7,9 +7,6 @@ import sys
 import time
 import zlib
 
-LZMA_FILTERS = [
-    {"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME},
-]
 
 def save_ebl(eblname, compressed_bytes, params):
     # Convert params dictionary to JSON string
@@ -37,24 +34,34 @@ def load_ebl(eblname):
     
     return compressed_bytes, params
 
+class LZMACompressor:
+    def __init__(self):
+        self.LZMA_FILTERS = [{"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME}]
+    
+    def compress(self, array):
+        compressed_data = lzma.compress(array.tobytes(), format=lzma.FORMAT_RAW, filters=self.LZMA_FILTERS)
+        return compressed_data
 
-def compress_array(array):
-    compressed_data = lzma.compress(array.tobytes(), format=lzma.FORMAT_RAW, filters=LZMA_FILTERS)
-    return compressed_data
+    def decompress(self, compressed_data, dtype):
+        binary_data = lzma.decompress(compressed_data, format=lzma.FORMAT_RAW, filters=self.LZMA_FILTERS)
+        array = np.frombuffer(binary_data, dtype=dtype)
+        return array
 
-    #binary_data = array.tobytes()
-    #compressed_data = zlib.compress(binary_data, level=9, wbits=-15)
-    #return compressed_data
+class ZlibCompressor:
+    def __init__(self):
+        pass
+        
+    def compress(self, array):
+        binary_data = array.tobytes()
+        compressed_data = zlib.compress(binary_data, level=9, wbits=-15)
+        return compressed_data
 
-def decompress_array(compressed_data, dtype):
-    binary_data = lzma.decompress(compressed_data, format=lzma.FORMAT_RAW, filters=LZMA_FILTERS)
-    array = np.frombuffer(binary_data, dtype=dtype)
-    return array
+    def decompress(self, compressed_data, dtype):
+        binary_data = zlib.decompress(compressed_data, wbits=-15)
+        array = np.frombuffer(binary_data, dtype=dtype)
+        return array
 
-    #binary_data = zlib.decompress(compressed_data, wbits=-15)
-    #array = np.frombuffer(binary_data, dtype=dtype)
-    #return array
-
+Compressor = LZMACompressor()
 
 def read_wave(filename, window_size):
     samplerate,x = scipy.io.wavfile.read(filename) #get wave data
@@ -115,11 +122,11 @@ class MDCT:
 def compressDCT(X,multiplier):
     X = np.round(X*multiplier)
     print(np.min(X), np.max(X))
-    compressedX = compress_array(X.flatten().astype(np.int8))
+    compressedX = Compressor.compress(X.flatten().astype(np.int8))
     return compressedX
     
 def decompressDCT(compressedX,params):
-    decompressedX = decompress_array(compressedX, np.int8)
+    decompressedX = Compressor.decompress(compressedX, np.int8)
     decompressedX = decompressedX.astype(np.float32) / params['m']
     decompressedX = np.reshape(decompressedX, (-1, params['c'], WINDOW_SIZE))
     return decompressedX
