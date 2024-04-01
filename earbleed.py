@@ -1,4 +1,7 @@
+#EarBleed audio format compressor
+
 import glob
+import iso226
 import json
 import lzma
 import numpy as np
@@ -7,9 +10,7 @@ import sys
 import time
 import zlib
 
-
 def save_ebl(eblname, compressed_bytes, params):
-    # Convert params dictionary to JSON string
     params_json = json.dumps(params)
     params_bytes = params_json.encode('utf-8')
     
@@ -19,6 +20,8 @@ def save_ebl(eblname, compressed_bytes, params):
         file.write(params_bytes)
         file.write(len(compressed_bytes).to_bytes(8, byteorder='little'))
         file.write(compressed_bytes)
+        
+    print(params)
 
 def load_ebl(eblname):
     with open(eblname, 'rb') as file:
@@ -61,8 +64,6 @@ class ZlibCompressor:
         array = np.frombuffer(binary_data, dtype=dtype)
         return array
 
-Compressor = LZMACompressor()
-
 def read_wave(filename, window_size):
     samplerate,x = scipy.io.wavfile.read(filename) #get wave data
     print(f"Read wav file: {x.shape} at {samplerate} Hz")
@@ -70,7 +71,6 @@ def read_wave(filename, window_size):
     #x = np.average(x,axis=-1,keepdims=True) #uncomment this to convert everything to mono
     
     if x.shape[-1] == 2: #use joint stereo
-        print("Using joint stereo 1")
         jointstereo = np.array([[1,1],[-1,1]])*0.5
         x = np.matmul(x, jointstereo)
 
@@ -85,7 +85,6 @@ def write_wave(filename, data, samplerate):
     print("writewave: ", data.shape)
     data = np.transpose(data)
     if data.shape[-1] == 2: #use joint stereo
-        print("Using joint stereo 2")
         jointstereo = np.array([[1,-1],[1,1]])
         data = np.matmul(data, jointstereo)
     scipy.io.wavfile.write(filename, samplerate, (np.clip(data,-1.0,1.0)*32767.0).astype(np.int16))
@@ -119,63 +118,67 @@ class MDCT:
         out = np.reshape(out, (out.shape[0],-1))
         return out
 
-def compressDCT(X,multiplier):
-    X = np.round(X*multiplier) #quantization. higher multiplier > better quality
+def compressDCT(X,params):
+    X = X*params['mult']
+    if params['psyaco'] == 1:
+        fv = np.array(iso226.get_freq_values(params['smplrate'], params['window']))
+        X = X*fv;
     
-    print(np.min(X), np.max(X))
-    #TODO: if min and max fit in a int8, use that instead.
-    #      the datatype has to be saved in the file.
-    
+    X = np.round(X) #quantization step
+
+    if np.min(X) >= -128 and np.max(X) <= 127:
+        params['dataint'] = 1
+    else:
+        params['dataint'] = 2
+       
+    typename = np.int8 if params['dataint']==1 else np.int16
     X = np.transpose(X, (1,0,2))
-    print("Saved shape: ", X.shape)
-    X[1:, :, :] -= X[:-1, :, :]
-    compressedX = Compressor.compress(X.flatten().astype(np.int8))
+    #saved shape is now: (channels, windows, window size)
+    X = X.flatten().astype(typename)
+    compressedX = Compressor.compress(X)
     return compressedX
     
 def decompressDCT(compressedX,params):
-    decompressedX = Compressor.decompress(compressedX, np.int8)
-    decompressedX = decompressedX.astype(np.float32) / params['m']
-    decompressedX = np.reshape(decompressedX, (params['c'], -1, WINDOW_SIZE))
-    decompressedX = np.cumsum(decompressedX, axis=0)
-    decompressedX = np.transpose(decompressedX, (1,0,2))
-    return decompressedX
+    typename = np.int8 if params['dataint']==1 else np.int16
+    X = Compressor.decompress(compressedX, typename)
+    X = X.astype(np.float32)
+    X = np.reshape(X, (params['channels'], -1, params['window']))
+    if params['psyaco'] == 1:
+        fv = np.array(iso226.get_freq_values(params['smplrate'], params['window']))
+        X = X / np.where(fv<0.00000001, 1, fv);
+    X = X / params['mult']
+    X = np.transpose(X, (1,0,2))
+    return X
 
+Compressor = LZMACompressor()
 
-MULTIPLIER = 9.33
-WINDOW_SIZE = 2048
+params = {}
+params['mult'] = 10.0 #quantization multiplier. higher value > better quality and bigger file
+params['window'] = 2 #MDCT window size
+params['psyaco'] = 0 #use psychoacoustic model? 1=yes, 0=no
+
 #wavename = "Kapittel_1.wav"
 #wavename = "rule001.wav"
 wavename = "fmi_0_gt.wav"
-x,samplerate = read_wave(wavename, WINDOW_SIZE)
-channels = x.shape[0]
-mdct = MDCT(WINDOW_SIZE)
+x,params['smplrate'] = read_wave(wavename, params['window'])
+params['channels'] = x.shape[0]
+mdct = MDCT(params['window'])
 X = mdct.forward(x)
-print(X.shape, " X shape")
 originalsize = X.shape[0]*X.shape[2]
-X = compressDCT(X, MULTIPLIER)
 
-compressedsize = len(X)
-print(f"compressedsize: {compressedsize}")
-seconds = originalsize/samplerate
-print(f"seconds: {seconds}")
-bitrate = compressedsize*8/1000/seconds
-print(f"bitrate: {bitrate} kbps")
+X = compressDCT(X, params)
+
+params['length'] = originalsize/params['smplrate']
+params['bitrate'] = len(X)*8/1000/params['length']
+print(f"compressedsize: {len(X)}")
+print(f"seconds: {params['length']}")
+print(f"bitrate: {params['bitrate']} kbps")
 
 eblname = wavename[:-4]+".ebl"
-params = {
-    'w':WINDOW_SIZE,
-    's':samplerate,
-    'c':channels,
-    'm':MULTIPLIER,
-    'b':bitrate,
-    'l':seconds
-}
-print("Saving to EBL: ", len(X))
 save_ebl(eblname, X, params)
 
 X,params = load_ebl(eblname)
-print("Loaded from EBL: ", len(X))
 X = decompressDCT(X, params)
 x_reconstructed = mdct.backward(X)
 
-write_wave("out.wav", x_reconstructed, samplerate)
+write_wave("out.wav", x_reconstructed, params['smplrate'])
